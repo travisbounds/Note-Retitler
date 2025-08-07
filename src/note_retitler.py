@@ -51,6 +51,79 @@ def setup_logging(log_file: str) -> logging.Logger:
     return logger
 
 
+def _parse_numeric_date(date_str: str) -> Optional[Tuple[str, str]]:
+    """
+    Helper function to parse a numeric date string.
+    
+    Args:
+        date_str: Numeric string to parse as date
+        
+    Returns:
+        Tuple of (original_date_part, formatted_date) or None if invalid
+    """
+    try:
+        if len(date_str) == 2:
+            # MD format: single digit month, single digit day
+            month = int(date_str[0])
+            day = int(date_str[1])
+            if 1 <= month <= 9 and 1 <= day <= 9:
+                return date_str, f"2025-0{month}-0{day}"
+                
+        elif len(date_str) == 3:
+            # Special handling for 7/14 format (714)
+            # Try M/DD format first: 714 -> 7/14 -> 2025-07-14
+            month = int(date_str[0])
+            day = int(date_str[1:])
+            if 1 <= month <= 9 and 1 <= day <= 31:
+                return date_str, f"2025-0{month}-{day:02d}"
+            
+            # MDD format: single digit month, double digit day
+            # Based on spec example: 123 -> 2025-12-03 (month 12, day 3)
+            # This suggests MMD interpretation: first two digits = month, last digit = day
+            month = int(date_str[:2])
+            day = int(date_str[2])
+            if 1 <= month <= 12 and 1 <= day <= 9:
+                return date_str, f"2025-{month:02d}-0{day}"
+                
+        elif len(date_str) == 4:
+            # MMDD format: two digit month, two digit day
+            # Based on spec example: 1225 -> 2025-12-25
+            month = int(date_str[:2])
+            day = int(date_str[2:])
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return date_str, f"2025-{month:02d}-{day:02d}"
+            
+            # Check if it ends with 25 (year 2025) - MDYY format
+            if date_str.endswith('25'):
+                # MDYY: single digit month, single digit day, year 25
+                month = int(date_str[0])
+                day = int(date_str[1])
+                if 1 <= month <= 9 and 1 <= day <= 9:
+                    return date_str, f"2025-0{month}-0{day}"
+                
+        elif len(date_str) == 5:
+            # Must end with 25 for year 2025
+            if date_str.endswith('25'):
+                # Based on spec example: 12225 -> 2025-12-22
+                # This is MMDYY: first two digits = month, next two digits = day, last two = year
+                month = int(date_str[:2])
+                day = int(date_str[2:4])  # Take two digits for day
+                if 1 <= month <= 12 and 1 <= day <= 31:
+                    return date_str, f"2025-{month:02d}-{day:02d}"
+                
+                # Alternative: MDDYY (month 1-9, day 10-31, year 25)
+                month = int(date_str[0])
+                day = int(date_str[1:3])
+                if 1 <= month <= 9 and 1 <= day <= 31:
+                    return date_str, f"2025-0{month}-{day:02d}"
+                    
+    except ValueError:
+        # Invalid date components
+        pass
+    
+    return None
+
+
 def parse_date_from_filename(filename: str) -> Optional[Tuple[str, str]]:
     """
     Extract and parse date from filename, converting to YYYY-MM-DD format.
@@ -58,6 +131,7 @@ def parse_date_from_filename(filename: str) -> Optional[Tuple[str, str]]:
     Handles these formats based on spec:
     - MD (2-3 digits): 12 -> 2025-01-02, 123 -> 2025-12-03  
     - MDYY/MDDYY (4-5 digits): 1225 -> 2025-12-25, 12225 -> 2025-12-22
+    - Files with only numeric names (like "714" from "7/14" with slashes stripped)
     
     Args:
         filename: The filename to parse
@@ -65,68 +139,24 @@ def parse_date_from_filename(filename: str) -> Optional[Tuple[str, str]]:
     Returns:
         Tuple of (original_date_part, formatted_date) or None if no date found
     """
+    # Get filename without extension for pure numeric check
+    name_without_ext = Path(filename).stem
+    
+    # Check if filename (without extension) is purely numeric - this handles cases like "714.txt" from "7/14"
+    if name_without_ext.isdigit():
+        date_str = name_without_ext
+        # Try to parse this as a date
+        result = _parse_numeric_date(date_str)
+        if result:
+            return result
+    
     # Extract numeric sequences that could be dates
     date_patterns = re.findall(r'(\d{2,5})', filename)
     
     for date_str in date_patterns:
-        try:
-            if len(date_str) == 2:
-                # MD format: single digit month, single digit day
-                month = int(date_str[0])
-                day = int(date_str[1])
-                if 1 <= month <= 9 and 1 <= day <= 9:
-                    return date_str, f"2025-0{month}-0{day}"
-                    
-            elif len(date_str) == 3:
-                # MDD format: single digit month, double digit day
-                # Based on spec example: 123 -> 2025-12-03 (month 12, day 3)
-                # This suggests MMD interpretation: first two digits = month, last digit = day
-                month = int(date_str[:2])
-                day = int(date_str[2])
-                if 1 <= month <= 12 and 1 <= day <= 9:
-                    return date_str, f"2025-{month:02d}-0{day}"
-                
-                # Alternative: MDD (month 1-9, day 10-31)
-                month = int(date_str[0])
-                day = int(date_str[1:])
-                if 1 <= month <= 9 and 1 <= day <= 31:
-                    return date_str, f"2025-0{month}-{day:02d}"
-                    
-            elif len(date_str) == 4:
-                # MMDD format: two digit month, two digit day
-                # Based on spec example: 1225 -> 2025-12-25
-                month = int(date_str[:2])
-                day = int(date_str[2:])
-                if 1 <= month <= 12 and 1 <= day <= 31:
-                    return date_str, f"2025-{month:02d}-{day:02d}"
-                
-                # Check if it ends with 25 (year 2025) - MDYY format
-                if date_str.endswith('25'):
-                    # MDYY: single digit month, single digit day, year 25
-                    month = int(date_str[0])
-                    day = int(date_str[1])
-                    if 1 <= month <= 9 and 1 <= day <= 9:
-                        return date_str, f"2025-0{month}-0{day}"
-                    
-            elif len(date_str) == 5:
-                # Must end with 25 for year 2025
-                if date_str.endswith('25'):
-                    # Based on spec example: 12225 -> 2025-12-22
-                    # This is MMDYY: first two digits = month, next two digits = day, last two = year
-                    month = int(date_str[:2])
-                    day = int(date_str[2:4])  # Take two digits for day
-                    if 1 <= month <= 12 and 1 <= day <= 31:
-                        return date_str, f"2025-{month:02d}-{day:02d}"
-                    
-                    # Alternative: MDDYY (month 1-9, day 10-31, year 25)
-                    month = int(date_str[0])
-                    day = int(date_str[1:3])
-                    if 1 <= month <= 9 and 1 <= day <= 31:
-                        return date_str, f"2025-0{month}-{day:02d}"
-                        
-        except ValueError:
-            # Invalid date components, continue to next pattern
-            continue
+        result = _parse_numeric_date(date_str)
+        if result:
+            return result
     
     return None
 

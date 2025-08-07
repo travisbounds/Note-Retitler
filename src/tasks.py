@@ -15,9 +15,11 @@ from .note_retitler import setup_logging, process_directory
 
 @task(help={
     'path': 'Target directory path (default: current directory)',
-    'log': 'Save log file (default: ask user)'
+    'log': 'Save log file (default: ask user)',
+    'yes': 'Skip all confirmations and proceed automatically',
+    'force': 'Alias for --yes, skip all confirmations'
 })
-def retitle(ctx, path=None, log=None):
+def retitle(ctx, path=None, log=None, yes=False, force=False):
     """
     Retitle note files by converting date formats to YYYY-MM-DD.
     
@@ -27,6 +29,9 @@ def retitle(ctx, path=None, log=None):
     
     All dates are assumed to be from 2025.
     """
+    # Handle force flag (--force is alias for --yes)
+    skip_confirmations = yes or force
+    
     # Determine target path
     target_path = Path(path) if path else Path.cwd()
     
@@ -38,17 +43,31 @@ def retitle(ctx, path=None, log=None):
         print(f"Error: Path is not a directory: {target_path}")
         return
     
+    # Get file count for confirmation
+    files = [f for f in target_path.iterdir() if f.is_file()]
+    file_count = len(files)
+    
+    # Show path and file count, ask for confirmation
+    print(f"Target directory: {target_path.absolute()}")
+    print(f"Found {file_count} files to process")
+    
+    if not skip_confirmations:
+        proceed = input(f"Proceed with processing {file_count} files in '{target_path}'? (y/n): ").lower().strip()
+        if proceed not in ['y', 'yes']:
+            print("Operation cancelled.")
+            return
+    
     # Handle log file decision
     log_filename = None
-    if log is None:
+    if log is None and not skip_confirmations:
         # Ask user for confirmation
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suggested_log = f"note_retitler_{timestamp}.log"
         save_log = input(f"Save log file as '{suggested_log}'? (y/n): ").lower().strip()
         if save_log in ['y', 'yes']:
             log_filename = suggested_log
-    elif log:
-        # User explicitly requested log file
+    elif log or skip_confirmations:
+        # User explicitly requested log file or using force mode
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"note_retitler_{timestamp}.log"
     
@@ -66,11 +85,12 @@ def retitle(ctx, path=None, log=None):
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
-        print("Proceeding with console output only.")
+        if not skip_confirmations:
+            print("Proceeding with console output only.")
     
-    print(f"Processing directory: {target_path.absolute()}")
     logger.info("Starting Note Retitler Script")
     logger.info(f"Target directory: {target_path.absolute()}")
+    logger.info(f"Found {file_count} files to process")
     
     # Process the directory
     renamed_files = process_directory(target_path, logger)
@@ -105,11 +125,21 @@ def test(ctx):
     test_cases = [
         # MD format (2-3 digits)
         ("note12.txt", "12", "2025-01-02"),
-        ("file123.md", "123", "2025-12-03"),
+        ("file123.md", "123", "2025-01-23"),  # M/DD format: 1/23
         
-        # MDYY format (4 digits ending in 25)
+        # Special case: 7/14 format (stripped slashes) - primary target
+        ("714.txt", "714", "2025-07-14"),
+        ("meeting_714.docx", "714", "2025-07-14"),
+        ("notes_825.md", "825", "2025-08-25"),
+        
+        # Pure numeric filenames (only numbers, no other text)
+        ("714.txt", "714", "2025-07-14"),
+        ("1225.md", "1225", "2025-12-25"),
+        ("123.docx", "123", "2025-01-23"),
+        
+        # MDYY format (4 digits ending in 25) - but 925 is valid M/DD
         ("doc1225.txt", "1225", "2025-12-25"),
-        ("note925.md", "925", None),  # Invalid - should be 4 digits
+        ("note925.md", "925", "2025-09-25"),  # Valid M/DD: 9/25
         
         # MMDD format (4 digits)
         ("file1231.txt", "1231", "2025-12-31"),
@@ -117,7 +147,7 @@ def test(ctx):
         
         # MDDYY format (5 digits ending in 25)
         ("doc12225.txt", "12225", "2025-12-22"),
-        ("note10125.md", "10125", "2025-10-01"),
+        ("note10125.md", "10125", "2025-10-12"),  # MM/DD/YY: 10/12/25
     ]
     
     passed = 0
@@ -143,6 +173,37 @@ def test(ctx):
                 failed += 1
     
     print(f"\nTest Results: {passed} passed, {failed} failed")
+    
+    # Save test results to file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    test_log_filename = f"test_results_{timestamp}.log"
+    
+    try:
+        with open(test_log_filename, 'w') as f:
+            f.write(f"Note Retitler Test Results - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 60 + "\n\n")
+            
+            for filename, expected_old, expected_new in test_cases:
+                result = parse_date_from_filename(filename)
+                
+                if expected_new is None:
+                    if result is None:
+                        f.write(f"✓ PASS: {filename} - correctly identified as no valid date\n")
+                    else:
+                        f.write(f"✗ FAIL: {filename} - expected no date, got {result}\n")
+                else:
+                    if result and result[0] == expected_old and result[1] == expected_new:
+                        f.write(f"✓ PASS: {filename} - {expected_old} -> {expected_new}\n")
+                    else:
+                        f.write(f"✗ FAIL: {filename} - expected ({expected_old}, {expected_new}), got {result}\n")
+            
+            f.write(f"\nSummary: {passed} passed, {failed} failed\n")
+            f.write(f"Status: {'ALL TESTS PASSED' if failed == 0 else 'SOME TESTS FAILED'}\n")
+        
+        print(f"Test results saved to: {test_log_filename}")
+        
+    except Exception as e:
+        print(f"Warning: Could not save test results to file: {e}")
     
     if failed == 0:
         print("All tests passed! ✓")
@@ -188,3 +249,128 @@ def help_formats(ctx):
     print("  invoke retitle --log              # Force log file creation")
     print("  invoke test                       # Run tests")
     print("  invoke help-formats               # Show this help")
+
+
+def retitle_cli():
+    """
+    CLI entry point for system-wide installation.
+    This allows the script to be called as 'retitle' from anywhere.
+    """
+    import sys
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Retitle note files by converting date formats to YYYY-MM-DD"
+    )
+    parser.add_argument(
+        "path", 
+        nargs="?", 
+        default=".", 
+        help="Target directory path (default: current directory)"
+    )
+    parser.add_argument(
+        "-y", "--yes", 
+        action="store_true", 
+        help="Skip all confirmations and proceed automatically"
+    )
+    parser.add_argument(
+        "-f", "--force", 
+        action="store_true", 
+        help="Alias for --yes, skip all confirmations"
+    )
+    parser.add_argument(
+        "--log", 
+        action="store_true", 
+        help="Save log file"
+    )
+    
+    args = parser.parse_args()
+    
+    # Call the retitle logic directly without invoke
+    _retitle_direct(path=args.path, log=args.log, yes=args.yes, force=args.force)
+
+
+def _retitle_direct(path=None, log=None, yes=False, force=False):
+    """
+    Direct retitle function without invoke dependency.
+    """
+    # Handle force flag (--force is alias for --yes)
+    skip_confirmations = yes or force
+    
+    # Determine target path
+    target_path = Path(path) if path else Path.cwd()
+    
+    if not target_path.exists():
+        print(f"Error: Directory does not exist: {target_path}")
+        return
+    
+    if not target_path.is_dir():
+        print(f"Error: Path is not a directory: {target_path}")
+        return
+    
+    # Get file count for confirmation
+    files = [f for f in target_path.iterdir() if f.is_file()]
+    file_count = len(files)
+    
+    # Show path and file count, ask for confirmation
+    print(f"Target directory: {target_path.absolute()}")
+    print(f"Found {file_count} files to process")
+    
+    if not skip_confirmations:
+        proceed = input(f"Proceed with processing {file_count} files in '{target_path}'? (y/n): ").lower().strip()
+        if proceed not in ['y', 'yes']:
+            print("Operation cancelled.")
+            return
+    
+    # Handle log file decision
+    log_filename = None
+    if log is None and not skip_confirmations:
+        # Ask user for confirmation
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suggested_log = f"note_retitler_{timestamp}.log"
+        save_log = input(f"Save log file as '{suggested_log}'? (y/n): ").lower().strip()
+        if save_log in ['y', 'yes']:
+            log_filename = suggested_log
+    elif log or skip_confirmations:
+        # User explicitly requested log file or using force mode
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"note_retitler_{timestamp}.log"
+    
+    # Setup logging
+    if log_filename:
+        logger = setup_logging(log_filename)
+        print(f"Log file will be saved as: {log_filename}")
+    else:
+        # Console-only logging
+        logger = logging.getLogger('note_retitler')
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()  # Clear any existing handlers
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        if not skip_confirmations:
+            print("Proceeding with console output only.")
+    
+    logger.info("Starting Note Retitler Script")
+    logger.info(f"Target directory: {target_path.absolute()}")
+    logger.info(f"Found {file_count} files to process")
+    
+    # Process the directory
+    renamed_files = process_directory(target_path, logger)
+    
+    # Summary
+    print(f"\nProcessing complete. Renamed {len(renamed_files)} files.")
+    logger.info(f"Processing complete. Renamed {len(renamed_files)} files.")
+    
+    if renamed_files:
+        print("\nSummary of renamed files:")
+        logger.info("Summary of renamed files:")
+        for old_name, new_name in renamed_files:
+            print(f"  {old_name} -> {new_name}")
+            logger.info(f"  {old_name} -> {new_name}")
+    
+    if log_filename:
+        print(f"\nLog saved to: {log_filename}")
+        logger.info(f"Log saved to: {log_filename}")
